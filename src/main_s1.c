@@ -25,6 +25,7 @@
 #include "em_prs.h"
 #include "em_ldma.h"
 #include "em_letimer.h"
+#include "em_gpio.h"
 
 // Change this to set number of samples per interrupt
 #define ADC_BUFFER_SIZE 8
@@ -37,7 +38,7 @@
 #define letimerClkFreq  19000000
 
 // Desired letimer interrupt frequency (in Hz)
-#define letimerDesired  100
+#define letimerDesired  1000
 
 #define letimerCompare  letimerClkFreq / letimerDesired
 
@@ -50,18 +51,47 @@ uint32_t adcBuffer[ADC_BUFFER_SIZE];
 LDMA_TransferCfg_t trans;
 LDMA_Descriptor_t descr;
 
+typedef unsigned char uint8_t;
 typedef unsigned int int32u_t;
+typedef unsigned short uint16_t;
 
-int32u_t reg0;
-int32u_t reg1;
+uint32_t reg0;
+uint32_t r_isr;
+uint32_t reg1;
+
+uint8_t flag = 0;
 
 void ADC0_IRQHandler(void)
 {
-  reg0 = ADC0->SINGLEFIFOCOUNT;
+//  reg0 = ADC0->SINGLEFIFOCOUNT;
+
+  uint32_t flags ;//= ADC_IntGet(ADC0);
+//  ADC_IntClear(ADC0, flags);
+  flags = ADC0->IF;
+  ADC0->IFC = flags;
+  reg0 = ADC0->IF;
   reg1 = ADC0->SINGLEDATA;
 
-  ADC0->IFC = (ADC0->IFC&0xfffeffff)|(1<<16);
+  r_isr = ADC0->CMPTHR;
 
+
+  if (flags & ADC_IEN_SINGLECMP){
+
+  if(flag){
+	  GPIO_PinOutToggle(gpioPortA,2);
+	  ADC0->CMPTHR = 4000<<16|4100;
+	  flag = 0;
+  }else{
+	  GPIO_PinOutToggle(gpioPortA,2);
+	  ADC0->CMPTHR = -10<<16|100;
+	  flag = 1;
+  	  }
+  }
+
+  r_isr = ADC0->CMPTHR;
+
+//  ADC0->IFC = (ADC0->IFC&0xfffeffff)|(1<<16);
+  ADC_Start(ADC0, adcStartSingle);
 }
 
 /**************************************************************************//**
@@ -76,6 +106,19 @@ void LDMA_IRQHandler(void)
 /**************************************************************************//**
  * @brief LETIMER initialization
  *****************************************************************************/
+
+void initGpio(void)
+{
+  // Enable GPIO and clock
+  CMU_ClockEnable(cmuClock_GPIO, true);
+
+  // Configure PF4 (LED0) as output
+  GPIO_PinModeSet(gpioPortA, 0, gpioModePushPull, 0);
+  GPIO_PinModeSet(gpioPortA, 2, gpioModePushPull, 0);
+
+//  GPIO_PinModeSet(gpioPortC,9,gpioModeInputPull,0);
+}
+
 void initLetimer(void)
 {
   // Start LFRCO and wait until it is stable
@@ -94,7 +137,8 @@ void initLetimer(void)
 
   // Reload COMP0 on underflow, pulse output, and run in repeat mode
   letimerInit.comp0Top  = true;
-  letimerInit.ufoa0     = letimerUFOAPulse;
+//  letimerInit.ufoa0     = letimerUFOAPulse;
+  letimerInit.ufoa0 = _LETIMER_CTRL_UFOA0_TOGGLE;
   letimerInit.repMode   = letimerRepeatFree;
 
   // Initialize LETIMER
@@ -108,6 +152,10 @@ void initLetimer(void)
 
   // Use LETIMER0 as async PRS to trigger ADC in EM2
   CMU_ClockEnable(cmuClock_PRS, true);
+
+  LETIMER0->ROUTEPEN |=  LETIMER_ROUTEPEN_OUT0PEN;
+
+  LETIMER0->ROUTELOC0 |= LETIMER_ROUTELOC0_OUT0LOC_LOC0;
 
   PRS_SourceAsyncSignalSet(PRS_CHANNEL, PRS_CH_CTRL_SOURCESEL_LETIMER0,
       PRS_CH_CTRL_SIGSEL_LETIMER0CH0);
@@ -194,9 +242,9 @@ void initAdc(void)
 
   ADC0->SINGLECTRL |=  (1 <<31);
 
-  reg0 = ADC0->SINGLECTRL;
+//  reg0 = ADC0->SINGLECTRL;
 
-  ADC0->CMPTHR = (1720 << 16 +  1760 );
+  ADC0->CMPTHR = -10<<00|100;
 
   reg1 = ADC0->CMPTHR;
 
@@ -206,7 +254,10 @@ void initAdc(void)
   // Clear the Single FIFO
   ADC0->SINGLEFIFOCLEAR = ADC_SINGLEFIFOCLEAR_SINGLEFIFOCLEAR;
 
-  ADC_IntEnable(ADC0, ADC_IEN_SINGLECMP);
+//  ADC_IntEnable(ADC0, ADC_IEN_SINGLECMP|ADC_IEN_SINGLE);
+
+  ADC_IntEnable(ADC0, ADC_IEN_SINGLECMP|ADC_IEN_SINGLE);
+
 
   // Enable ADC interrupts
   NVIC_ClearPendingIRQ(ADC0_IRQn);
@@ -222,6 +273,8 @@ int main(void)
 
   // Setup ADC to perform conversions via PRS
   initAdc();
+
+  initGpio();
   // Setup DMA to move ADC results to user memory
   initLdma();
   // Set up LETIMER to trigger ADC via PRS in periodic intervals
@@ -231,6 +284,6 @@ int main(void)
   while(1)
   {
     // Enter EM2 until next ADC interrupt
-    EMU_EnterEM2(false);
+  // EMU_EnterEM2(false);
   }
 }
